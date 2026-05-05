@@ -1,0 +1,88 @@
+name: Convert sing-box rulesets to SRS
+
+on:
+  schedule:
+    # 按照 Cron 表达式，每 3 天执行一次 (UTC 时间 02:00，北京时间 10:00)
+    - cron: '0 2 */3 * *'
+  workflow_dispatch: # 允许你在网页端手动点击运行测试
+
+jobs:
+  build-and-convert:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # 允许工作流提交代码
+      actions: write   # 允许工作流删除旧的 actions 记录
+
+    steps:
+      # 1. 检出你自己的仓库（用于存储最终生成的 srs 文件）
+      - name: Checkout your repository
+        uses: actions/checkout@v4
+        with:
+          path: my-repo
+
+      # 2. 检出 SukkaLab 的规则集仓库
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          repository: SukkaLab/ruleset.skk.moe
+          path: upstream-repo
+
+      # 3. 安装最新版的 sing-box
+      - name: Install sing-box
+        run: |
+          echo "Fetching latest sing-box release..."
+          LATEST_URL=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep -E "browser_download_url.*sing-box-.*-linux-amd64.tar.gz" | head -n 1 | cut -d '"' -f 4)
+          wget -O sing-box.tar.gz "$LATEST_URL"
+          tar -xzf sing-box.tar.gz
+          
+          # 找到解压出的二进制文件并移动到系统路径
+          find . -name "sing-box" -type f -exec sudo mv {} /usr/local/bin/ \;
+          sudo chmod +x /usr/local/bin/sing-box
+          sing-box version
+
+      # 4. 递归转换 json 为 srs
+      - name: Compile JSON to SRS
+        run: |
+          # 在你的仓库中创建一个 srs 文件夹来存放结果
+          mkdir -p my-repo/srs
+          cd upstream-repo/sing-box
+          
+          # 递归查找并转换
+          find . -type f -name "*.json" | while read -r file; do
+            # 获取相对目录结构，以便在生成的 srs 文件夹中保持原有目录层级
+            dir=$(dirname "$file")
+            filename=$(basename "$file" .json)
+            
+            # 在输出目录创建对应的子文件夹
+            mkdir -p "../../my-repo/srs/$dir"
+            
+            echo "Compiling $file -> srs/$dir/$filename.srs"
+            sing-box rule-set compile "$file" -o "../../my-repo/srs/$dir/$filename.srs"
+          done
+
+      # 5. 提交并推送到你的仓库
+      - name: Commit and Push
+        run: |
+          cd my-repo
+          # 配置 git 机器人信息
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          
+          git add srs/
+          
+          # 检查是否有文件改动，如果有则提交
+          if ! git diff --staged --quiet; then
+            git commit -m "Auto update sing-box SRS rulesets"
+            git push
+          else
+            echo "No changes to commit. SRS files are up to date."
+          fi
+
+      # 6. 清理 20 天以前的 Actions 运行记录
+      - name: Delete old workflow runs
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          retain_days: 20          # 清理20天之前的记录
+          keep_minimum_runs: 3     # 即使超过20天，也至少保留最近的3次记录防丢
